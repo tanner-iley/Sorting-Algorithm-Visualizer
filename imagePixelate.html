@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Image Pixelate + Column Sort by Color Count</title>
+  <style>
+    :root { --bg:#0b0f14; --panel:#111824; --ink:#e9eef3; --muted:#91a4bc; --border:#1c2633; }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif}
+    header{display:flex;gap:12px;flex-wrap:wrap;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border);background:var(--panel)}
+    label{font-size:12px;color:var(--muted)}
+    .group{display:flex;gap:8px;align-items:center;background:#0f1520;border:1px solid var(--border);padding:8px;border-radius:12px}
+    input[type="file"],select,input[type="number"],input[type="range"],button{border:1px solid var(--border);background:#0f1724;color:var(--ink);padding:8px 10px;border-radius:10px;font-size:14px}
+    button{cursor:pointer}
+    button:disabled{opacity:.6;cursor:not-allowed}
+    main{display:grid;grid-template-columns:1fr 360px;gap:0}
+    #stage{display:flex;justify-content:center;align-items:center;min-height:60vh;background:radial-gradient(1200px 600px at 50% 20%, #0e1522, #0b0f14)}
+    canvas{max-width:100%;height:auto}
+    aside{border-left:1px solid var(--border);padding:16px;background:var(--panel)}
+    .row{display:flex;align-items:center;justify-content:space-between;margin:8px 0}
+    .hint{color:var(--muted);font-size:12px}
+    .kbd{font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;background:#0d1522;border:1px solid var(--border);padding:2px 6px;border-radius:6px;font-size:12px}
+    #swatch{width:24px;height:24px;border-radius:6px;border:1px solid var(--border);background:#ffffff}
+    #readout{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:var(--muted)}
+    #countsBar{display:grid;grid-template-columns:repeat(12,1fr);gap:2px;margin-top:8px}
+    .bar{height:6px;background:#243044;border-radius:3px}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="group">
+      <label for="file">Image</label>
+      <input id="file" type="file" accept="image/*" />
+    </div>
+    <div class="group">
+      <label for="block">Block</label>
+      <input id="block" type="number" min="2" max="64" step="2" value="12" style="width:80px" />
+      <span class="hint">px per tile</span>
+    </div>
+    <div class="group">
+      <button id="pixelateBtn">Pixelate</button>
+      <button id="resetBtn">Reset</button>
+    </div>
+    <div class="group">
+      <label>Pick Color</label>
+      <div id="swatch" title="Selected color"></div>
+      <span id="hex" class="hint">#FFFFFF</span>
+      <span id="readout" class="hint"></span>
+    </div>
+    <div class="group">
+      <label for="tol">Tolerance</label>
+      <input id="tol" type="range" min="0" max="100" value="10" />
+      <span id="tolLbl" class="hint"></span>
+    </div>
+    <div class="group">
+      <label for="order">Order</label>
+      <select id="order">
+        <option value="desc" selected>Most→Least Matches</option>
+        <option value="asc">Least→Most Matches</option>
+      </select>
+      <button id="sortColsBtn">Sort Columns by Color Count</button>
+    </div>
+    <span id="status" class="hint" style="margin-left:auto"></span>
+  </header>
+
+  <main>
+    <section id="stage">
+      <canvas id="canvas"></canvas>
+    </section>
+    <aside>
+      <h3 style="margin:0 0 8px">What this does</h3>
+      <ol class="hint" style="line-height:1.5">
+        <li>Upload an image.</li>
+        <li>Choose a <span class="kbd">Block</span> size and click <span class="kbd">Pixelate</span> to mosaic the image into equal tiles.</li>
+        <li>Click on the image to <strong>sample a color</strong> (swatch + hex update). Optionally adjust <strong>Tolerance</strong>.</li>
+        <li>Click <span class="kbd">Sort Columns by Color Count</span>. Columns are reordered by how many pixels (within tolerance) match the selected color.</li>
+      </ol>
+      <p class="hint">Tip: With pixelation on, each tile is a solid color; counting uses the underlying pixels, so results scale with tile size. Tolerance compares distance in RGB space.</p>
+      <div id="countsWrap" class="hint">
+        <div style="display:flex;align-items:center;gap:8px;margin-top:8px">
+          <span>Top 12 column counts</span>
+        </div>
+        <div id="countsBar"></div>
+      </div>
+    </aside>
+  </main>
+
+  <script>
+    const fileInput = document.getElementById('file');
+    const blockInput = document.getElementById('block');
+    const pixelateBtn = document.getElementById('pixelateBtn');
+    const resetBtn = document.getElementById('resetBtn');
+    const sortColsBtn = document.getElementById('sortColsBtn');
+    const orderSel = document.getElementById('order');
+    const tolRange = document.getElementById('tol');
+    const tolLbl = document.getElementById('tolLbl');
+
+    const swatch = document.getElementById('swatch');
+    const hexEl = document.getElementById('hex');
+    const readout = document.getElementById('readout');
+
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const statusEl = document.getElementById('status');
+
+    const countsBar = document.getElementById('countsBar');
+
+    let originalImageBitmap = null; // For reset
+    let grid = null; // 2D array of block colors [cols][rows] = {r,g,b}
+    let cols = 0, rows = 0, block = 12;
+    let selected = { r:255, g:255, b:255 };
+
+    function setStatus(msg) { statusEl.textContent = msg || ''; }
+    function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
+
+    function rgbToHex(r,g,b){
+      const h = (n)=> n.toString(16).padStart(2,'0');
+      return `#${h(r)}${h(g)}${h(b)}`.toUpperCase();
+    }
+
+    function drawImageBitmapToCanvas(bmp){
+      const maxW = Math.min(window.innerWidth - 360, 1400);
+      const maxH = Math.min(window.innerHeight - 140, 900);
+      const scale = Math.min(maxW / bmp.width, maxH / bmp.height, 1);
+      const w = Math.floor(bmp.width * scale);
+      const h = Math.floor(bmp.height * scale);
+      canvas.width = w; canvas.height = h;
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.clearRect(0,0,w,h);
+      ctx.drawImage(bmp, 0, 0, w, h);
+    }
+
+    async function handleFile(file){
+      if(!file) return;
+      const url = URL.createObjectURL(file);
+      const bmp = await createImageBitmap(await (await fetch(url)).blob());
+      URL.revokeObjectURL(url);
+      originalImageBitmap = bmp;
+      drawImageBitmapToCanvas(bmp);
+      grid = null; cols = rows = 0;
+      setStatus('Image loaded. Click to sample a color, or Pixelate first.');
+    }
+
+    fileInput.addEventListener('change', e => handleFile(e.target.files[0]));
+
+    // Pixelation
+    function buildGridFromImage() {
+      const w = canvas.width, h = canvas.height;
+      const img = ctx.getImageData(0,0,w,h);
+      const data = img.data;
+      cols = Math.floor(w / block);
+      rows = Math.floor(h / block);
+      grid = Array.from({length: cols}, () => Array.from({length: rows}, () => ({r:0,g:0,b:0})));
+
+      for (let gx = 0; gx < cols; gx++) {
+        for (let gy = 0; gy < rows; gy++) {
+          let rs=0, gs=0, bs=0, count=0;
+          const x0 = gx * block, y0 = gy * block;
+          for (let y = y0; y < y0 + block && y < h; y++) {
+            for (let x = x0; x < x0 + block && x < w; x++) {
+              const idx = (y*w + x) * 4;
+              rs += data[idx];
+              gs += data[idx+1];
+              bs += data[idx+2];
+              count++;
+            }
+          }
+          grid[gx][gy] = { r: rs/count, g: gs/count, b: bs/count };
+        }
+      }
+    }
+
+    function drawGrid() {
+      const w = canvas.width, h = canvas.height;
+      ctx.clearRect(0,0,w,h);
+      for (let x = 0; x < cols; x++) {
+        for (let y = 0; y < rows; y++) {
+          const {r,g,b} = grid[x][y];
+          ctx.fillStyle = `rgb(${r|0},${g|0},${b|0})`;
+          ctx.fillRect(x*block, y*block, block, block);
+        }
+      }
+    }
+
+    pixelateBtn.addEventListener('click', () => {
+      if(!originalImageBitmap){ setStatus('Load an image first.'); return; }
+      block = clamp(parseInt(blockInput.value||12,10), 2, 64);
+      drawImageBitmapToCanvas(originalImageBitmap);
+      buildGridFromImage();
+      drawGrid();
+      setStatus(`Pixelated: ${cols}×${rows} tiles (block ${block}px)`);
+    });
+
+    resetBtn.addEventListener('click', () => {
+      if(!originalImageBitmap) return;
+      drawImageBitmapToCanvas(originalImageBitmap);
+      grid = null; cols = rows = 0;
+      setStatus('Reset to original image.');
+      updateCountsViz([]);
+    });
+
+    // Color picking
+    function canvasToImageCoords(evt){
+      const rect = canvas.getBoundingClientRect();
+      const x = Math.floor((evt.clientX - rect.left) * (canvas.width / rect.width));
+      const y = Math.floor((evt.clientY - rect.top) * (canvas.height / rect.height));
+      return {x,y};
+    }
+
+    canvas.addEventListener('mousemove', (e)=>{
+      if(!canvas.width) return;
+      const {x,y} = canvasToImageCoords(e);
+      const {r,g,b} = getPixelRGB(x,y);
+      readout.textContent = `@(${x},${y}) rgb(${r},${g},${b}) ${rgbToHex(r,g,b)}`;
+    });
+
+    canvas.addEventListener('click', (e)=>{
+      const {x,y} = canvasToImageCoords(e);
+      const {r,g,b} = getPixelRGB(x,y);
+      selected = {r,g,b};
+      swatch.style.background = `rgb(${r},${g},${b})`;
+      hexEl.textContent = rgbToHex(r,g,b);
+      setStatus('Color selected. Now click "Sort Columns by Color Count".');
+    });
+
+    function getPixelRGB(x,y){
+      x = clamp(x,0,canvas.width-1); y = clamp(y,0,canvas.height-1);
+      const d = ctx.getImageData(x,y,1,1).data;
+      return { r:d[0], g:d[1], b:d[2] };
+    }
+
+    // Counting matches per column
+    function colorDist2(a,b){
+      const dr=a.r-b.r, dg=a.g-b.g, db=a.b-b.b; return dr*dr + dg*dg + db*db;
+    }
+
+    function countMatchesPerColumn(){
+      const w = canvas.width, h = canvas.height;
+      const tol = Number(tolRange.value); // 0..100
+      // Map tol 0..100 -> distance threshold^2 up to ~ (3*255^2)
+      const maxD2 = 3*255*255;
+      const thr2 = (tol/100) * maxD2; // linear map
+
+      // We'll use the pixelated grid if present for speed; otherwise count on raw image
+      if(grid){
+        const counts = new Array(cols).fill(0);
+        const pixelsPerTile = block*block;
+        for(let x=0;x<cols;x++){
+          let c=0;
+          for(let y=0;y<rows;y++){
+            const col = grid[x][y];
+            if(colorDist2(col, selected) <= thr2) c += pixelsPerTile;
+          }
+          counts[x]=c;
+        }
+        return counts;
+      } else {
+        const img = ctx.getImageData(0,0,w,h); const d = img.data;
+        const counts = new Array(w).fill(0);
+        for(let x=0;x<w;x++){
+          let c=0;
+          for(let y=0;y<h;y++){
+            const idx=(y*w+x)*4; const a={r:d[idx],g:d[idx+1],b:d[idx+2]};
+            if(colorDist2(a, selected) <= thr2) c++;
+          }
+          counts[x]=c;
+        }
+        // Convert to column counts at current block size if user hasn't pixelated: group per block width
+        const b = Math.max(1, Math.min(block, w));
+        cols = Math.floor(w / b); // define columns compatible with sort
+        return counts.reduce((arr, val, xi)=>{
+          const gx = Math.floor(xi / b);
+          if(gx < cols){ arr[gx] = (arr[gx]||0) + val; }
+          return arr;
+        }, new Array(cols).fill(0));
+      }
+    }
+
+    function updateCountsViz(counts){
+      countsBar.innerHTML = '';
+      if(!counts || !counts.length) return;
+      const sorted = [...counts].sort((a,b)=>b-a).slice(0,12);
+      const max = sorted[0] || 1;
+      for(const v of sorted){
+        const b = document.createElement('div');
+        b.className = 'bar';
+        b.style.width = '100%';
+        b.style.height = Math.max(3, (v/max)*48) + 'px';
+        b.title = `${v} px`;
+        countsBar.appendChild(b);
+      }
+    }
+
+    // Sort columns by color-count and redraw
+    sortColsBtn.addEventListener('click', ()=>{
+      if(!originalImageBitmap){ setStatus('Load an image first.'); return; }
+      // Ensure we have a grid (pixelation). If not, we build it using current block size.
+      block = clamp(parseInt(blockInput.value||12,10), 2, 64);
+      if(!grid){ drawImageBitmapToCanvas(originalImageBitmap); buildGridFromImage(); }
+
+      const counts = countMatchesPerColumn();
+      updateCountsViz(counts);
+
+      const idx = [...Array(cols).keys()];
+      const asc = orderSel.value === 'asc' ? 1 : -1;
+      idx.sort((a,b)=> asc*(counts[a]-counts[b]) || (a-b));
+
+      const newGrid = Array.from({length: cols}, ()=> new Array(rows));
+      for(let newX=0; newX<cols; newX++){
+        const oldX = idx[newX];
+        for(let y=0;y<rows;y++) newGrid[newX][y] = grid[oldX][y];
+      }
+      grid = newGrid;
+      drawGrid();
+      setStatus(`Sorted columns by color count (${hexEl.textContent}) with tolerance ${tolRange.value}.`);
+    });
+
+    // UI labels
+    function updateTol(){ tolLbl.textContent = `${tolRange.value} / 100`; }
+    tolRange.addEventListener('input', updateTol); updateTol();
+
+    // Demo fallback if no image
+    (async function demo(){
+      const w=640,h=400; const off=document.createElement('canvas'); off.width=w; off.height=h; const octx=off.getContext('2d');
+      const g=octx.createLinearGradient(0,0,w,h); g.addColorStop(0,'#7aa2ff'); g.addColorStop(.5,'#ef476f'); g.addColorStop(1,'#ffd166');
+      octx.fillStyle=g; octx.fillRect(0,0,w,h);
+      const bmp = await createImageBitmap(off);
+      originalImageBitmap = bmp; drawImageBitmapToCanvas(bmp);
+      setStatus('Demo image ready. Click to pick a color, then Pixelate and Sort.');
+    })();
+  </script>
+</body>
+</html>

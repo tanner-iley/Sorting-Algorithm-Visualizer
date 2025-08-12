@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>3D Scatter & Sort Visualizer • Three.js</title>
+  <style>
+    :root { --bg:#0b0f14; --panel:#111824; --ink:#e9eef3; --muted:#91a4bc; --border:#1c2633; }
+    *{box-sizing:border-box}
+    body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif}
+    header{position:fixed;left:0;top:0;right:0;display:flex;gap:10px;flex-wrap:wrap;align-items:center;padding:10px;border-bottom:1px solid var(--border);background:linear-gradient(180deg,#0f1624,#0b0f14)}
+    label{font-size:12px;color:var(--muted)}
+    .group{display:flex;gap:8px;align-items:center;background:#0f1520;border:1px solid var(--border);padding:8px;border-radius:12px}
+    select,input[type="range"],button{border:1px solid var(--border);background:#0f1724;color:var(--ink);padding:6px 8px;border-radius:10px;font-size:14px}
+    button{cursor:pointer}
+    #stage{position:fixed;inset:56px 0 0 0}
+    #info{position:fixed;right:10px;bottom:10px;color:var(--muted);font-size:12px;background:#0f1520;border:1px solid var(--border);padding:6px 10px;border-radius:10px}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="group">
+      <label>Shape</label>
+      <select id="shape">
+        <option value="sphere" selected>Sphere</option>
+        <option value="box">Box</option>
+        <option value="cone">Cone</option>
+        <option value="cylinder">Cylinder</option>
+      </select>
+      <label>Count</label>
+      <input id="count" type="range" min="50" max="3000" value="600" />
+      <span id="countLbl" style="font-size:12px;color:var(--muted)"></span>
+    </div>
+    <div class="group">
+      <label>Scatter Range</label>
+      <input id="range" type="range" min="1" max="10" value="4" />
+      <span id="rangeLbl" style="font-size:12px;color:var(--muted)"></span>
+    </div>
+    <div class="group">
+      <label>Sort Key</label>
+      <select id="key">
+        <option value="x">X</option>
+        <option value="y">Y</option>
+        <option value="z">Z</option>
+        <option value="dist" selected>Distance to Origin</option>
+        <option value="rand">Random Tag</option>
+      </select>
+      <label>Order</label>
+      <select id="order">
+        <option value="asc" selected>Ascending</option>
+        <option value="desc">Descending</option>
+      </select>
+    </div>
+    <div class="group">
+      <label>Layout</label>
+      <select id="layout">
+        <option value="lineX" selected>Line (X axis)</option>
+        <option value="lineY">Line (Y axis)</option>
+        <option value="lineZ">Line (Z axis)</option>
+        <option value="circle">Circle</option>
+        <option value="spiral">Spiral</option>
+        <option value="grid">Grid Plane</option>
+      </select>
+      <label>Spacing</label>
+      <input id="spacing" type="range" min="0.01" max="0.5" step="0.01" value="0.08" />
+    </div>
+    <div class="group">
+      <label>Anim Speed</label>
+      <input id="speed" type="range" min="0.1" max="3" step="0.1" value="1.2" />
+      <button id="scatter">Scatter</button>
+      <button id="sort">Sort</button>
+      <button id="reset">Reset</button>
+    </div>
+  </header>
+  <div id="stage"></div>
+  <div id="info">Drag to orbit • Scroll to zoom • Shift+Drag to pan</div>
+
+  <script type="module">
+    import * as THREE from "https://unpkg.com/three@0.161.0/build/three.module.js";
+    import { OrbitControls } from "https://unpkg.com/three@0.161.0/examples/jsm/controls/OrbitControls.js";
+
+    // Scene setup
+    const stage = document.getElementById('stage');
+    const renderer = new THREE.WebGLRenderer({ antialias:true, powerPreference:'high-performance' });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(stage.clientWidth, stage.clientHeight);
+    stage.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0b0f14);
+
+    const camera = new THREE.PerspectiveCamera(60, stage.clientWidth/stage.clientHeight, 0.1, 200);
+    camera.position.set(6, 4, 8);
+    scene.add(camera);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+
+    // Lights
+    const hemi = new THREE.HemisphereLight(0xffffff, 0x223344, 0.8);
+    scene.add(hemi);
+    const dir = new THREE.DirectionalLight(0xffffff, 0.9);
+    dir.position.set(5,6,4);
+    scene.add(dir);
+
+    // UI elements
+    const shapeSel = document.getElementById('shape');
+    const countRange = document.getElementById('count');
+    const countLbl = document.getElementById('countLbl');
+    const rangeRange = document.getElementById('range');
+    const rangeLbl = document.getElementById('rangeLbl');
+    const keySel = document.getElementById('key');
+    const orderSel = document.getElementById('order');
+    const layoutSel = document.getElementById('layout');
+    const spacingRange = document.getElementById('spacing');
+    const speedRange = document.getElementById('speed');
+    const scatterBtn = document.getElementById('scatter');
+    const sortBtn = document.getElementById('sort');
+    const resetBtn = document.getElementById('reset');
+
+    const tmpObj = new THREE.Object3D();
+
+    // Data per instance
+    let N = Number(countRange.value);
+    let R = Number(rangeRange.value);
+    let points = []; // {pos:THREE.Vector3, rand:number}
+    let targets = []; // target positions during animations
+    let inMotion = false;
+
+    const palette = [0x7aa2ff, 0xef476f, 0xffd166, 0x06d6a0, 0x8ecae6, 0xb8f2e6, 0xffadad, 0xcdb4db];
+
+    let instanced = null; // InstancedMesh
+
+    function makeGeometry(kind){
+      switch(kind){
+        case 'box': return new THREE.BoxGeometry(0.12,0.12,0.12,1,1,1);
+        case 'cone': return new THREE.ConeGeometry(0.09, 0.18, 12, 1);
+        case 'cylinder': return new THREE.CylinderGeometry(0.08, 0.08, 0.16, 16, 1);
+        default: return new THREE.SphereGeometry(0.09, 16, 12);
+      }
+    }
+
+    function rebuildInstanced(){
+      if(instanced){ scene.remove(instanced); instanced.geometry.dispose(); instanced.material.dispose(); }
+      const geo = makeGeometry(shapeSel.value);
+      const mat = new THREE.MeshStandardMaterial({ metalness:0.2, roughness:0.5, vertexColors:true });
+      instanced = new THREE.InstancedMesh(geo, mat, N);
+      instanced.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      instanced.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(N*3), 3);
+      scene.add(instanced);
+    }
+
+    function randomPointInCube(range){
+      return new THREE.Vector3(
+        (Math.random()*2-1)*range,
+        (Math.random()*2-1)*range,
+        (Math.random()*2-1)*range
+      );
+    }
+
+    function scatter(){
+      N = Number(countRange.value); R = Number(rangeRange.value);
+      countLbl.textContent = `${N}`; rangeLbl.textContent = `±${R}`;
+      rebuildInstanced();
+      points = new Array(N).fill(0).map(()=>({ pos: randomPointInCube(R), rand: Math.random() }));
+      bakeToGPU(points.map(p=>p.pos));
+    }
+
+    function bakeToGPU(positions){
+      const color = new THREE.Color();
+      for(let i=0;i<N;i++){
+        const p = positions[i];
+        tmpObj.position.copy(p);
+        tmpObj.rotation.set(0,0,0);
+        tmpObj.updateMatrix();
+        instanced.setMatrixAt(i, tmpObj.matrix);
+        // Color by height + palette for variety
+        const mix = THREE.MathUtils.clamp((p.y + R)/(2*R), 0, 1);
+        const base = palette[Math.floor(i % palette.length)];
+        color.set(base).lerp(new THREE.Color(0xffffff), mix*0.4);
+        instanced.instanceColor.setXYZ(i, color.r, color.g, color.b);
+      }
+      instanced.instanceColor.needsUpdate = true;
+      instanced.instanceMatrix.needsUpdate = true;
+    }
+
+    function keyValue(p){
+      switch(keySel.value){
+        case 'x': return p.pos.x;
+        case 'y': return p.pos.y;
+        case 'z': return p.pos.z;
+        case 'rand': return p.rand;
+        case 'dist': default: return p.pos.length();
+      }
+    }
+
+    function buildLayoutTargets(sortedIdx){
+      const layout = layoutSel.value;
+      const s = Number(spacingRange.value);
+      targets = new Array(N);
+
+      if(layout.startsWith('line')){
+        // line along chosen axis, centered
+        const axis = layout === 'lineX' ? 'x' : layout === 'lineY' ? 'y' : 'z';
+        const start = -((N-1)*s)/2;
+        for(let i=0;i<N;i++){
+          const t = new THREE.Vector3(0,0,0);
+          t[axis] = start + i*s;
+          targets[sortedIdx[i]] = t; // preserve instance id mapping
+        }
+      } else if(layout === 'grid'){
+        // square grid on XZ plane (y=0)
+        const side = Math.ceil(Math.sqrt(N));
+        const start = -((side-1)*s)/2;
+        for(let i=0;i<N;i++){
+          const gx = i % side, gz = Math.floor(i/side);
+          const t = new THREE.Vector3(start + gx*s, 0, start + gz*s);
+          targets[sortedIdx[i]] = t;
+        }
+      } else if(layout === 'circle'){
+        const radius = Math.max(1.5, (N*s)/(2*Math.PI));
+        for(let i=0;i<N;i++){
+          const a = (i/N)*Math.PI*2;
+          const t = new THREE.Vector3(Math.cos(a)*radius, 0, Math.sin(a)*radius);
+          targets[sortedIdx[i]] = t;
+        }
+      } else if(layout === 'spiral'){
+        const turns = 3.0, radius = Math.max(1.2, (N*s)/(2*Math.PI*turns));
+        for(let i=0;i<N;i++){
+          const a = (i/N)*Math.PI*2*turns;
+          const r = radius * (i/N);
+          const t = new THREE.Vector3(Math.cos(a)*r, (i/N - 0.5)*2.0, Math.sin(a)*r);
+          targets[sortedIdx[i]] = t;
+        }
+      }
+    }
+
+    function sortAndAnimate(){
+      // Build index array and sort by key
+      const idx = [...Array(N).keys()];
+      const asc = orderSel.value === 'asc' ? 1 : -1;
+      idx.sort((a,b)=> asc*(keyValue(points[a]) - keyValue(points[b])) || (a-b));
+      buildLayoutTargets(idx);
+      inMotion = true; // let animation loop interpolate to targets
+    }
+
+    function reset(){
+      // Return to original scattered positions
+      targets = points.map(p=>p.pos.clone());
+      inMotion = true;
+    }
+
+    // Animate
+    const clock = new THREE.Clock();
+    function tick(){
+      const dt = Math.min(0.033, clock.getDelta());
+      const speed = Number(speedRange.value);
+
+      if(inMotion && targets && targets.length===N){
+        let allClose = true;
+        for(let i=0;i<N;i++){
+          const cur = points[i].pos;
+          const tgt = targets[i];
+          // Smooth towards target
+          cur.lerp(tgt, 1 - Math.exp(-speed * dt));
+          if(cur.distanceToSquared(tgt) > 1e-5) allClose = false;
+        }
+        bakeToGPU(points.map(p=>p.pos));
+        if(allClose) inMotion = false;
+      }
+
+      controls.update();
+      renderer.render(scene, camera);
+      requestAnimationFrame(tick);
+    }
+
+    // Events
+    countRange.addEventListener('input', ()=>{ countLbl.textContent = `${countRange.value}`; });
+    rangeRange.addEventListener('input', ()=>{ rangeLbl.textContent = `±${rangeRange.value}`; });
+    spacingRange.addEventListener('input', ()=>{});
+
+    scatterBtn.addEventListener('click', ()=>{ scatter(); });
+    sortBtn.addEventListener('click', ()=>{ sortAndAnimate(); });
+    resetBtn.addEventListener('click', ()=>{ reset(); });
+
+    function onResize(){
+      const w = stage.clientWidth, h = stage.clientHeight;
+      renderer.setSize(w,h,false);
+      camera.aspect = w/h; camera.updateProjectionMatrix();
+    }
+    window.addEventListener('resize', onResize);
+
+    // Init
+    countLbl.textContent = `${N}`; rangeLbl.textContent = `±${R}`;
+    scatter();
+    targets = points.map(p=>p.pos.clone());
+    tick();
+  </script>
+</body>
+</html>

@@ -1,0 +1,707 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Sorting Algorithm Visualizer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { --gap: 2px; }
+    body { margin: 0; font-family: system-ui, Arial, sans-serif; background:#0b0f14; color:#e9eef3; }
+    header { padding: 16px; display:flex; flex-wrap:wrap; gap:12px; align-items:center; border-bottom:1px solid #1c2633; }
+    label { font-size: 14px; opacity:.9; margin-right:6px; }
+    select, input[type="range"], button {
+      background:#111824; color:#e9eef3; border:1px solid #243044; border-radius:8px;
+      padding:8px 10px; font-size:14px;
+    }
+    button { cursor:pointer }
+    button:disabled { opacity:.6; cursor:not-allowed }
+    #viz {
+      height: calc(100vh - 88px);
+      display:flex; align-items:flex-end; gap: var(--gap); padding: 12px; box-sizing:border-box;
+    }
+    .bar { background:#7aa2ff; border-radius:6px 6px 0 0; transition: transform 0.1s linear; }
+    .bar.active { background:#ffd166; }
+    .bar.swap { background:#ef476f; }
+    .bar.sorted { background:#06d6a0; }
+    footer { position:fixed; bottom:0; left:0; right:0; padding:8px 12px; font-size:12px; color:#91a4bc; background:#0b0f14; border-top:1px solid #1c2633; }
+  </style>
+</head>
+<body>
+  <header>
+    <label>Algorithm</label>
+    <select id="algo">
+      <option>Selection Sort</option>
+      <option>Insertion Sort</option>
+      <option>Quick Sort</option>
+      <option>Merge Sort</option>
+      <option>Heap Sort</option>
+      <option>Radix Sort (LSD)</option>
+      <option>Radix Sort (MSD)</option>
+      <option>std::sort (Intro Sort)</option>
+      <option>std::stable_sort (Adaptive Merge Sort)</option>
+      <option>Shell Sort</option>
+      <option>Bubble Sort</option>
+      <option>Cocktail Shaker Sort</option>
+      <option>Gnome Sort</option>
+      <option>Bitonic Sort</option>
+      <option>Bogo Sort (30s)</option>
+    </select>
+
+    <label>Size</label>
+    <input type="range" id="size" min="5" max="150" value="60" />
+
+    <label>Speed</label>
+    <input type="range" id="speed" min="0" max="100" value="40" />
+    <span id="speedLabel"></span>
+
+    <button id="shuffleBtn">Shuffle</button>
+    <button id="sortBtn">Sort</button>
+    <span id="status" style="margin-left:auto; opacity:.85;"></span>
+  </header>
+
+  <main id="viz" aria-label="Visualizer"></main>
+  <footer>
+    Pro tip: drag “Size” to change number of bars; “Speed” controls delay per step (lower = faster).
+  </footer>
+
+  <script>
+    // --- State & Utilities ---
+    const viz = document.getElementById('viz');
+    const algoSel = document.getElementById('algo');
+    const sizeRange = document.getElementById('size');
+    const speedRange = document.getElementById('speed');
+    const speedLabel = document.getElementById('speedLabel');
+    const shuffleBtn = document.getElementById('shuffleBtn');
+    const sortBtn = document.getElementById('sortBtn');
+    const statusEl = document.getElementById('status');
+
+    let data = [];
+    let bars = [];
+    let running = false;
+
+    function msPerStep() {
+      // Map 0..100 to ~1..150 ms (lower = faster)
+      const v = Number(speedRange.value);
+      return Math.round(1 + (100 - v) * 1.49);
+    }
+    function delay() { return new Promise(r => setTimeout(r, msPerStep())); }
+    function tinyDelay() { return new Promise(r => setTimeout(r, Math.max(0, Math.min(30, Math.floor(msPerStep()/4))))); }
+    function randInt(n) { return Math.floor(Math.random() * n); }
+
+    function generateData(n) {
+      data = Array.from({length: n}, (_, i) => i + 1);
+      // Fisher-Yates shuffle
+      for (let i = n - 1; i > 0; i--) {
+        const j = randInt(i + 1);
+        [data[i], data[j]] = [data[j], data[i]];
+      }
+    }
+
+    function render() {
+      viz.innerHTML = '';
+      const n = data.length;
+      const w = (viz.clientWidth - (n - 1) * parseInt(getComputedStyle(document.documentElement).getPropertyValue('--gap'))) / n;
+      const h = viz.clientHeight;
+      bars = data.map(val => {
+        const bar = document.createElement('div');
+        bar.className = 'bar';
+        bar.style.width = Math.max(2, w) + 'px';
+        bar.style.height = Math.max(2, Math.round((val / n) * h)) + 'px';
+        viz.appendChild(bar);
+        return bar;
+      });
+    }
+
+    function refreshHeights(from=0, to=data.length-1) {
+      const n = data.length, h = viz.clientHeight;
+      for (let i = from; i <= to; i++) {
+        bars[i].style.height = Math.max(2, Math.round((data[i] / n) * h)) + 'px';
+      }
+    }
+    function setActive(i, j=null) {
+      if (i != null) bars[i]?.classList.add('active');
+      if (j != null) bars[j]?.classList.add('active');
+    }
+    function clearActive(i=null, j=null) {
+      if (i != null) bars[i]?.classList.remove('active');
+      if (j != null) bars[j]?.classList.remove('active');
+    }
+    function markSwap(i, j) {
+      if (i != null) bars[i]?.classList.add('swap');
+      if (j != null) bars[j]?.classList.add('swap');
+    }
+    function clearSwap(i, j) {
+      if (i != null) bars[i]?.classList.remove('swap');
+      if (j != null) bars[j]?.classList.remove('swap');
+    }
+    function setStatus(t) { statusEl.textContent = t || ''; }
+    async function visualSwap(i, j) {
+      if (!running || i===j) return;
+      setActive(i, j);
+      markSwap(i, j);
+      await delay();
+      [data[i], data[j]] = [data[j], data[i]];
+      refreshHeights(Math.min(i,j), Math.max(i,j));
+      await delay();
+      clearSwap(i, j);
+      clearActive(i, j);
+    }
+    function isSorted(l=0, r=data.length-1) {
+      for (let i = l+1; i <= r; i++) if (data[i-1] > data[i]) return false;
+      return true;
+    }
+
+    // --- Algorithms (animated) ---
+
+    // 1) Selection Sort
+    async function selectionSort() {
+      const n = data.length;
+      for (let i = 0; i < n-1 && running; i++) {
+        let minIdx = i;
+        for (let j = i+1; j < n && running; j++) {
+          setActive(minIdx, j);
+          await tinyDelay();
+          if (data[j] < data[minIdx]) {
+            clearActive(minIdx, null);
+            minIdx = j;
+            setActive(minIdx, null);
+          }
+          clearActive(null, j);
+        }
+        if (minIdx !== i) await visualSwap(i, minIdx);
+      }
+    }
+
+    // 2) Insertion Sort (already present but kept)
+    async function insertionSort() {
+      for (let i = 1; i < data.length && running; i++) {
+        let key = data[i];
+        let j = i - 1;
+        setActive(i, null);
+        await delay();
+        while (j >= 0 && data[j] > key && running) {
+          setActive(j, j+1);
+          markSwap(j, j+1);
+          data[j+1] = data[j];
+          refreshHeights(j, j+1);
+          await delay();
+          clearSwap(j, j+1);
+          clearActive(j, j+1);
+          j--;
+        }
+        data[j+1] = key;
+        refreshHeights(j+1, j+1);
+        clearActive(i, null);
+        await delay();
+      }
+    }
+
+    // 3) Quick Sort (already present but keep for use in introsort too)
+    async function quickSort() {
+      async function partition(l, r) {
+        const pivot = data[r];
+        let i = l - 1;
+        for (let j = l; j < r && running; j++) {
+          setActive(j, r);
+          await tinyDelay();
+          if (data[j] <= pivot) {
+            i++;
+            await visualSwap(i, j);
+          }
+          clearActive(j, r);
+        }
+        await visualSwap(i+1, r);
+        return i + 1;
+      }
+      async function qsort(l, r) {
+        if (!running) return;
+        if (l < r) {
+          const p = await partition(l, r);
+          await qsort(l, p - 1);
+          await qsort(p + 1, r);
+        }
+      }
+      await qsort(0, data.length - 1);
+    }
+
+    // 4) Merge Sort (stable)
+    async function mergeSort() {
+      async function merge(l, m, r) {
+        const left = data.slice(l, m+1);
+        const right = data.slice(m+1, r+1);
+        let i = 0, j = 0, k = l;
+        while (i < left.length && j < right.length && running) {
+          setActive(k, null);
+          await tinyDelay();
+          if (left[i] <= right[j]) {
+            data[k] = left[i++]; 
+          } else {
+            data[k] = right[j++];
+          }
+          refreshHeights(k, k);
+          k++;
+        }
+        while (i < left.length && running) {
+          setActive(k, null);
+          data[k] = left[i++]; refreshHeights(k, k);
+          await tinyDelay(); k++;
+        }
+        while (j < right.length && running) {
+          setActive(k, null);
+          data[k] = right[j++]; refreshHeights(k, k);
+          await tinyDelay(); k++;
+        }
+        clearActive(null, null);
+      }
+      async function msort(l, r) {
+        if (!running || l >= r) return;
+        const m = Math.floor((l + r) / 2);
+        await msort(l, m);
+        await msort(m+1, r);
+        await merge(l, m, r);
+      }
+      await msort(0, data.length - 1);
+    }
+
+    // 5) Heap Sort
+    async function heapSort() {
+      async function heapify(n, i) {
+        let largest = i;
+        const l = 2*i+1, r = 2*i+2;
+        if (l < n) { setActive(l, largest); await tinyDelay(); if (data[l] > data[largest]) largest = l; clearActive(l, i); }
+        if (r < n) { setActive(r, largest); await tinyDelay(); if (data[r] > data[largest]) largest = r; clearActive(r, i); }
+        if (!running) return;
+        if (largest !== i) {
+          await visualSwap(i, largest);
+          await heapify(n, largest);
+        }
+      }
+      const n = data.length;
+      for (let i = Math.floor(n/2)-1; i >= 0 && running; i--) await heapify(n, i);
+      for (let end = n-1; end > 0 && running; end--) {
+        await visualSwap(0, end);
+        await heapify(end, 0);
+      }
+    }
+
+    // 6) Radix Sort (LSD) – base 10, non-negative integers
+    async function radixSortLSD() {
+      let maxVal = Math.max(...data);
+      for (let exp = 1; Math.floor(maxVal/exp) > 0 && running; exp *= 10) {
+        // counting sort by digit
+        const n = data.length;
+        const output = new Array(n);
+        const count = new Array(10).fill(0);
+        for (let i = 0; i < n; i++) count[Math.floor(data[i]/exp)%10]++;
+        for (let i = 1; i < 10; i++) count[i] += count[i-1];
+        for (let i = n-1; i >= 0; i--) {
+          const d = Math.floor(data[i]/exp) % 10;
+          output[--count[d]] = data[i];
+        }
+        for (let i = 0; i < n && running; i++) {
+          setActive(i, null);
+          data[i] = output[i];
+          refreshHeights(i, i);
+          await tinyDelay();
+          clearActive(i, null);
+        }
+      }
+    }
+
+    // 7) Radix Sort (MSD) – base 10
+    async function radixSortMSD() {
+      const maxVal = Math.max(...data);
+      const maxExp = 10 ** Math.floor(Math.log10(Math.max(1, maxVal)));
+
+      async function msd(l, r, exp) {
+        if (!running || exp === 0 || l >= r) return;
+        const buckets = Array.from({length:10}, () => []);
+        for (let i = l; i <= r; i++) {
+          const d = Math.floor(data[i] / exp) % 10;
+          buckets[d].push(data[i]);
+        }
+        // write back with animation
+        let idx = l;
+        const ranges = [];
+        for (let d = 0; d < 10; d++) {
+          const start = idx;
+          for (const v of buckets[d]) {
+            setActive(idx, null);
+            data[idx++] = v;
+            refreshHeights(idx-1, idx-1);
+            await tinyDelay();
+            clearActive(idx-1, null);
+          }
+          const end = idx-1;
+          if (end >= start) ranges.push([start, end, d]);
+        }
+        // recurse into each non-empty bucket
+        for (const [start, end, _d] of ranges) {
+          await msd(start, end, Math.floor(exp/10));
+        }
+      }
+      await msd(0, data.length-1, maxExp);
+    }
+
+    // Helpers for introsort
+    function floorLog2(n){ return Math.floor(Math.log2(Math.max(1,n))); }
+
+    // 8) std::sort (Intro Sort) – quicksort with depth limit -> heapsort, small -> insertion
+    async function introSort() {
+      const maxDepth = 2 * floorLog2(data.length);
+      const INSERTION_THRESHOLD = 16;
+
+      async function insertionRange(l, r) {
+        for (let i = l+1; i <= r && running; i++) {
+          const key = data[i];
+          let j = i - 1;
+          while (j >= l && data[j] > key && running) {
+            setActive(j, j+1);
+            markSwap(j, j+1);
+            data[j+1] = data[j];
+            refreshHeights(j, j+1);
+            await tinyDelay();
+            clearSwap(j, j+1);
+            clearActive(j, j+1);
+            j--;
+          }
+          data[j+1] = key;
+          refreshHeights(j+1, j+1);
+          await tinyDelay();
+        }
+      }
+
+      async function heapSortRange(l, r) {
+        const size = r - l + 1;
+        function left(i){return 2*i+1;}
+        function right(i){return 2*i+2;}
+        async function heapify(n, i) {
+          let largest = i;
+          const li = left(i), ri = right(i);
+          const gi = (idx)=> l + idx;
+          if (li<n) { setActive(gi(li), gi(largest)); await tinyDelay(); if (data[gi(li)]>data[gi(largest)]) largest=li; clearActive(gi(li), gi(i)); }
+          if (ri<n) { setActive(gi(ri), gi(largest)); await tinyDelay(); if (data[gi(ri)]>data[gi(largest)]) largest=ri; clearActive(gi(ri), gi(i)); }
+          if (!running) return;
+          if (largest !== i) {
+            await visualSwap(l+ i, l+ largest);
+            await heapify(n, largest);
+          }
+        }
+        for (let i = Math.floor(size/2)-1; i >= 0 && running; i--) await heapify(size, i);
+        for (let end = size-1; end > 0 && running; end--) {
+          await visualSwap(l+0, l+end);
+          await heapify(end, 0);
+        }
+      }
+
+      async function partition(l, r, pivotIdx) {
+        const pivot = data[pivotIdx];
+        await visualSwap(pivotIdx, r);
+        let store = l;
+        for (let i = l; i < r && running; i++) {
+          setActive(i, r);
+          await tinyDelay();
+          if (data[i] < pivot) {
+            await visualSwap(i, store);
+            store++;
+          }
+          clearActive(i, r);
+        }
+        await visualSwap(store, r);
+        return store;
+      }
+
+      function medianOfThree(a,b,c) {
+        const A=data[a], B=data[b], C=data[c];
+        if ((A<=B && B<=C) || (C<=B && B<=A)) return b;
+        if ((B<=A && A<=C) || (C<=A && A<=B)) return a;
+        return c;
+      }
+
+      async function sort(l, r, depth) {
+        while (running && l < r) {
+          if (r - l + 1 <= INSERTION_THRESHOLD) {
+            await insertionRange(l, r);
+            return;
+          }
+          if (depth === 0) {
+            await heapSortRange(l, r);
+            return;
+          }
+          const m = Math.floor((l + r) / 2);
+          const pivotIdx = medianOfThree(l, m, r);
+          const p = await partition(l, r, pivotIdx);
+          // Tail recurse on smaller side first (to avoid deep recursion)
+          if (p - l < r - p) {
+            await sort(l, p - 1, depth - 1);
+            l = p + 1;
+          } else {
+            await sort(p + 1, r, depth - 1);
+            r = p - 1;
+          }
+        }
+      }
+
+      await sort(0, data.length-1, maxDepth);
+    }
+
+    // 9) std::stable_sort (Adaptive Merge Sort) – stable; insertion for small runs, merge otherwise
+    async function adaptiveMergeSort() {
+      const RUN = 32; // small run optimization (Tim-ish)
+      async function insertionRange(l, r) {
+        for (let i = l+1; i <= r && running; i++) {
+          const key = data[i];
+          let j = i - 1;
+          while (j >= l && data[j] > key && running) {
+            setActive(j, j+1);
+            data[j+1] = data[j];
+            refreshHeights(j, j+1);
+            await tinyDelay();
+            clearActive(j, j+1);
+            j--;
+          }
+          data[j+1] = key;
+          refreshHeights(j+1, j+1);
+          await tinyDelay();
+        }
+      }
+      async function merge(l, m, r) {
+        const left = data.slice(l, m+1);
+        const right = data.slice(m+1, r+1);
+        let i=0,j=0,k=l;
+        while (i<left.length && j<right.length && running) {
+          setActive(k, null);
+          await tinyDelay();
+          if (left[i] <= right[j]) data[k++] = left[i++]; else data[k++] = right[j++];
+          refreshHeights(k-1, k-1);
+        }
+        while (i<left.length && running) { setActive(k); data[k++] = left[i++]; refreshHeights(k-1,k-1); await tinyDelay(); }
+        while (j<right.length && running) { setActive(k); data[k++] = right[j++]; refreshHeights(k-1,k-1); await tinyDelay(); }
+        clearActive();
+      }
+      const n = data.length;
+      // sort small runs
+      for (let i=0; i<n && running; i+=RUN) await insertionRange(i, Math.min(i+RUN-1, n-1));
+      // merge runs up
+      for (let size=RUN; size < n && running; size*=2) {
+        for (let left=0; left < n-size && running; left += 2*size) {
+          const mid = left + size -1;
+          const right = Math.min(left + 2*size -1, n-1);
+          if (data[mid] <= data[mid+1]) continue; // already ordered
+          await merge(left, mid, right);
+        }
+      }
+    }
+
+    // 10) Shell Sort (gap halving)
+    async function shellSort() {
+      const n = data.length;
+      for (let gap = Math.floor(n/2); gap > 0 && running; gap = Math.floor(gap/2)) {
+        for (let i = gap; i < n && running; i++) {
+          const temp = data[i];
+          let j = i;
+          while (j >= gap && data[j-gap] > temp && running) {
+            setActive(j-gap, j);
+            markSwap(j-gap, j);
+            data[j] = data[j-gap];
+            refreshHeights(j, j);
+            await tinyDelay();
+            clearSwap(j-gap, j);
+            clearActive(j-gap, j);
+            j -= gap;
+          }
+          data[j] = temp;
+          refreshHeights(j, j);
+          await tinyDelay();
+        }
+      }
+    }
+
+    // 11) Bubble Sort
+    async function bubbleSort() {
+      let n = data.length;
+      let swapped = true;
+      for (let pass = 0; pass < n - 1 && swapped && running; pass++) {
+        swapped = false;
+        for (let i = 0; i < n - pass - 1 && running; i++) {
+          setActive(i, i+1);
+          await tinyDelay();
+          if (data[i] > data[i+1]) {
+            await visualSwap(i, i+1);
+            swapped = true;
+          }
+          clearActive(i, i+1);
+        }
+      }
+    }
+
+    // 12) Cocktail Shaker Sort
+    async function cocktailShakerSort() {
+      let start = 0, end = data.length - 1;
+      let swapped = true;
+      while (swapped && running) {
+        swapped = false;
+        for (let i = start; i < end && running; i++) {
+          setActive(i, i+1);
+          await tinyDelay();
+          if (data[i] > data[i+1]) { await visualSwap(i, i+1); swapped = true; }
+          clearActive(i, i+1);
+        }
+        if (!swapped) break;
+        swapped = false;
+        end--;
+        for (let i = end; i > start && running; i--) {
+          setActive(i-1, i);
+          await tinyDelay();
+          if (data[i-1] > data[i]) { await visualSwap(i-1, i); swapped = true; }
+          clearActive(i-1, i);
+        }
+        start++;
+      }
+    }
+
+    // 13) Gnome Sort
+    async function gnomeSort() {
+      let i = 0, n = data.length;
+      while (i < n && running) {
+        if (i === 0 || data[i-1] <= data[i]) {
+          i++;
+        } else {
+          await visualSwap(i-1, i);
+          i--;
+        }
+        await tinyDelay();
+      }
+    }
+
+    // 14) Bitonic Sort (works for any length; skips out-of-range compares)
+    async function bitonicSort() {
+      const n = data.length;
+      // next power of two
+      let p = 1; while (p < n) p <<= 1;
+
+      async function bitonicMerge(lo, cnt, dir) {
+        if (!running || cnt <= 1) return;
+        const k = Math.floor(cnt/2);
+        for (let i = lo; i < lo + cnt - k && running; i++) {
+          const j = i + k;
+          if (i < n && j < n) {
+            setActive(i, j);
+            await tinyDelay();
+            const needSwap = dir ? (data[i] > data[j]) : (data[i] < data[j]);
+            if (needSwap) await visualSwap(i, j);
+            clearActive(i, j);
+          }
+        }
+        await bitonicMerge(lo, k, dir);
+        await bitonicMerge(lo + k, k, dir);
+      }
+
+      async function bitonicSortRec(lo, cnt, dir) {
+        if (!running || cnt <= 1) return;
+        const k = Math.floor(cnt/2);
+        await bitonicSortRec(lo, k, true);   // ascending
+        await bitonicSortRec(lo + k, k, false); // descending
+        await bitonicMerge(lo, cnt, dir);
+      }
+
+      await bitonicSortRec(0, p, true);
+    }
+
+    // 15) Bogo Sort – runs up to 30 seconds
+    async function bogoSort() {
+      const start = Date.now();
+      function shuffleRange() {
+        for (let i = data.length - 1; i > 0; i--) {
+          const j = randInt(i+1);
+          [data[i], data[j]] = [data[j], data[i]];
+        }
+      }
+      while (running && !isSorted() && (Date.now() - start) < 30000) {
+        shuffleRange();
+        refreshHeights(0, data.length-1);
+        setStatus('Bogo shuffling…');
+        await delay();
+      }
+      if (isSorted()) setStatus('Bogo succeeded (lucky!)'); else setStatus('Bogo stopped (30s limit)');
+    }
+
+    // Algorithm map
+    const algos = {
+      'Selection Sort': selectionSort,
+      'Insertion Sort': insertionSort,
+      'Quick Sort': quickSort,
+      'Merge Sort': mergeSort,
+      'Heap Sort': heapSort,
+      'Radix Sort (LSD)': radixSortLSD,
+      'Radix Sort (MSD)': radixSortMSD,
+      'std::sort (Intro Sort)': introSort,
+      'std::stable_sort (Adaptive Merge Sort)': adaptiveMergeSort,
+      'Shell Sort': shellSort,
+      'Bubble Sort': bubbleSort,
+      'Cocktail Shaker Sort': cocktailShakerSort,
+      'Gnome Sort': gnomeSort,
+      'Bitonic Sort': bitonicSort,
+      'Bogo Sort (30s)': bogoSort
+    };
+
+    // --- Controls ---
+    function shuffle() {
+      if (running) return;
+      const n = Number(sizeRange.value);
+      generateData(n);
+      render();
+      setStatus(`Shuffled ${n} bars`);
+    }
+
+    async function runSort() {
+      if (running) return;
+      running = true;
+      algoSel.disabled = true;
+      sizeRange.disabled = true;
+      shuffleBtn.disabled = true;
+      sortBtn.disabled = true;
+      setStatus(`Running ${algoSel.value}…`);
+      try {
+        // clear any visual flags
+        bars.forEach(b => { b.classList.remove('sorted','active','swap'); });
+
+        // Radix sorts require non-negative ints; our data are 1..n (OK)
+
+        await algos[algoSel.value]();
+
+        if (running) {
+          bars.forEach(b => b.classList.add('sorted'));
+          setStatus(`Done: ${algoSel.value}`);
+        } else {
+          setStatus('Cancelled');
+        }
+      } finally {
+        running = false;
+        algoSel.disabled = false;
+        sizeRange.disabled = false;
+        shuffleBtn.disabled = false;
+        sortBtn.disabled = false;
+        setTimeout(() => bars.forEach(b => b.classList.remove('sorted')), 800);
+      }
+    }
+
+    // Resize handling to keep bar heights accurate
+    let resizeTO;
+    window.addEventListener('resize', () => {
+      clearTimeout(resizeTO);
+      resizeTO = setTimeout(() => { if (!running) render(); }, 100);
+    });
+
+    // Events
+    shuffleBtn.addEventListener('click', shuffle);
+    sortBtn.addEventListener('click', runSort);
+    sizeRange.addEventListener('input', () => { if (!running) shuffle(); });
+    speedRange.addEventListener('input', () => speedLabel.textContent = `${msPerStep()} ms/step`);
+
+    // Init
+    speedLabel.textContent = `${msPerStep()} ms/step`;
+    shuffle();
+  </script>
+</body>
+</html>
